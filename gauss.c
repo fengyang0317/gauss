@@ -217,7 +217,9 @@ void computeGauss(int nsize)
 			}
 			R[i] /= pivotval;
 		}
+		pthread_mutex_lock (&mut);	//lock
 		pthread_cond_broadcast(&cond);
+		pthread_mutex_unlock(&mut);
 	}
 	for (j = 0; j < num_threads; j++)
 		pthread_join(threads[j], &status);
