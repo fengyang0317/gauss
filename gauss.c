@@ -3,7 +3,7 @@
  *
  * Modified:         Kai Shen (January 2010)
  */
-
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +12,7 @@
 #include <math.h>
 #include <assert.h>
 #include <pthread.h>
+#include <sched.h>
 
 /* #define DEBUG */
 
@@ -152,6 +153,19 @@ void getPivot(int nsize, int currow)
 	}
 }
 
+void print_core() {
+	int i;
+	cpu_set_t get;
+	if (pthread_getaffinity_np(pthread_self(), sizeof(get), &get) < 0) {
+		printf("get error\n");
+		exit(1);
+	}
+	for (i = 0; i < 8; i++) {
+		if (CPU_ISSET(i, &get))
+			printf("Thread %d is running in processor %d\n", (int)pthread_self(), i);
+	}
+}
+
 void *fact_row(void* _id) {
 	long long id = (long long) _id;
 	int i = id >> 32, j, k;
@@ -180,7 +194,16 @@ void computeGauss(int nsize)
 	int i, j;
 	double pivotval;
 	void *status;
+	cpu_set_t mask;
 	pthread_t *threads = (pthread_t*) malloc(num_threads * sizeof(pthread_t));
+
+	CPU_ZERO(&mask);
+	CPU_SET(7, &mask);
+	if (pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask) < 0) {
+		printf("pin error\n");
+		exit(1);
+	}
+	print_core();
 
 	for (i = 0; i < nsize; i++) {
 		getPivot(nsize,i);
@@ -201,6 +224,12 @@ void computeGauss(int nsize)
 			para <<= 32;
 			para |= j;
 			pthread_create(threads + j, NULL, fact_row, (void*) para);
+			CPU_ZERO(&mask);
+			CPU_SET(j, &mask);
+			if (pthread_setaffinity_np(threads[j], sizeof(mask), &mask) < 0) {
+				printf("pin error\n");
+				exit(1);
+			}
 			//pivotval = matrix[j][i];
 			//matrix[j][i] = 0.0;
 			//for (k = i + 1; k < nsize; k++) {
