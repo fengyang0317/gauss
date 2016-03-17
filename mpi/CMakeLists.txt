@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 2.8)
+find_package(MPI REQUIRED)
+include_directories(${MPI_INCLUDE_PATH})
+add_executable(gauss gauss_internal_input.c)
+target_link_libraries(gauss ${MPI_LIBRARIES})
