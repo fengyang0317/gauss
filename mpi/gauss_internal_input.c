@@ -2,7 +2,7 @@
 #include <sys/time.h>
 #include <stdlib.h>
 #include <assert.h>
-
+#include "mpi.h"
 
 
 #define NSIZE       128
@@ -24,13 +24,13 @@ void allocate_memory(int size)
 
 	matrix = (double**)malloc(size*sizeof(double*));
 	assert(matrix != NULL);
-	tmp = (double*)malloc(size*size*sizeof(double));
+    tmp = (double*)malloc(size*(size+1)*sizeof(double));
 	assert(tmp != NULL);
 
 	for(i = 0; i < size; i++){
 		matrix[i] = tmp;
-		tmp = tmp + size;
-	}
+        tmp = tmp + size + 1;
+    }
 
 	B = (double*)malloc(size * sizeof(double));
 	assert(B != NULL);
@@ -54,10 +54,12 @@ void initMatrix(int nsize)
 		for(j = 0; j < nsize ; j++) {
 			matrix[i][j] = ((j < i )? 2*(j+1) : 2*(i+1));
 		}
-		B[i] = (double)i;
+        matrix[i][j] = (double)i;
 		swap[i] = i;
 	}
 }
+
+int numtasks, rank;
 
 /* Get the pivot row. If the value in the current pivot position is 0,
  * try to swap with a non-zero row. If that is not possible bail
@@ -65,50 +67,60 @@ void initMatrix(int nsize)
 
 void getPivot(int nsize, int currow)
 {
-	int i,irow;
-	double big;
-	double tmp;
+    int i, irow = -1, lrank = (numtasks - currow % numtasks + rank) % numtasks;
 
-	big = matrix[currow][currow];
-	irow = currow;
+    for (i = currow + lrank; i < nsize; i+=numtasks) {
+        if (matrix[i][currow] > 0) {
+            irow = i;
+            break;
+        }
+    }
 
-	if (big == 0.0) {
-		for(i = currow ; i < nsize; i++){
-			tmp = matrix[i][currow];
-			if (tmp != 0.0){
-				big = tmp;
-				irow = i;
-				break;
-			}
-		}
-	}
+    int *recvbuf;
+    if (rank == currow % numtasks) {
+        recvbuf = malloc(numtasks * sizeof(int));
+    }
 
-	if (big == 0.0){
-		printf("The matrix is singular\n");
-		exit(-1);
-	}
+    MPI_Gather(&irow, 1, MPI_INT, recvbuf, 1, MPI_INT, currow % numtasks, MPI_COMM_WORLD);
 
-	if (irow != currow){
-		for(i = currow; i < nsize ; i++){
-			SWAP(matrix[irow][i],matrix[currow][i]);
-		}
-		SWAP(B[irow],B[currow]);
-		SWAPINT(swap[irow],swap[currow]);
-	}
+    if (rank == currow % numtasks) {
+        i = currow % numtasks;
+        while (i < numtasks && recvbuf[i] == -1)
+            i++;
 
+        if (i == numtasks){
+            printf("The matrix is singular\n");
+            exit(-1);
+        }
+    }
 
+    MPI_Bcast(&i, 1, MPI_INT, currow % numtasks, MPI_COMM_WORLD);
+
+    if (i != currow % numtasks){
+        if (rank == i) {
+            MPI_Status stat;
+            int rc = MPI_Sendrecv_replace(matrix[irow], nsize+1, MPI_DOUBLE, currow % numtasks, 0, currow % numtasks, 0, MPI_COMM_WORLD, &stat);
+        }
+        if (rank == currow % numtasks) {
+            MPI_Status stat;
+            int rc = MPI_Sendrecv_replace(matrix[currow], nsize+1, MPI_DOUBLE, i, 0, i, 0, MPI_COMM_WORLD, &stat);
+        }
+    }
+
+    if (rank == currow % numtasks)
 	{
 		double pivotVal;
 		pivotVal = matrix[currow][currow];
 
 		if (pivotVal != 1.0){
 			matrix[currow][currow] = 1.0;
-			for(i = currow + 1; i < nsize; i++){
+            for(i = currow + 1; i <= nsize; i++){
 				matrix[currow][i] /= pivotVal;
 			}
-			B[currow] /= pivotVal;
-		}
+        }
 	}
+
+    MPI_Bcast(matrix[currow], nsize+1, MPI_DOUBLE, currow % numtasks, MPI_COMM_WORLD);
 }
 
 
@@ -125,13 +137,13 @@ void computeGauss(int nsize)
 
 		pivotVal = matrix[i][i];
 
-		for (j = i + 1 ; j < nsize; j++){
+        int lrank = (numtasks - (i+1) % numtasks + rank) % numtasks;
+        for (j = i + 1 + lrank ; j < nsize; j+=numtasks){
 			pivotVal = matrix[j][i];
 			matrix[j][i] = 0.0;
-			for (k = i + 1 ; k < nsize; k++){
+            for (k = i + 1 ; k <= nsize; k++){
 				matrix[j][k] -= pivotVal * matrix[i][k];
 			}
-			B[j] -= pivotVal * B[i];
 		}
 	}
 }
@@ -166,8 +178,10 @@ int main(int argc,char *argv[])
 	long compTime;
 	double Time;
 	int nsize = NSIZE;
-    
-    int numtasks, rank;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
 	while((i = getopt(argc,argv,"s:")) != -1){
 		switch(i){
@@ -190,13 +204,16 @@ int main(int argc,char *argv[])
 
 	allocate_memory(nsize);
 
-	gettimeofday(&start, 0);
 	initMatrix(nsize);
+	gettimeofday(&start, 0);
 	computeGauss(nsize);
+	if (rank == 0) {
+	gettimeofday(&finish, 0);
+        for (i = 0; i < nsize; i++)
+            B[i] = matrix[i][nsize];
 #if VERIFY
 	solveGauss(nsize);
 #endif
-	gettimeofday(&finish, 0);
 
 	compTime = (finish.tv_sec - start.tv_sec) * 1000000;
 	compTime = compTime + (finish.tv_usec - start.tv_usec);
@@ -208,6 +225,7 @@ int main(int argc,char *argv[])
 	for(i = 0; i < nsize; i++)
 		printf("%6.5f %5.5f\n",B[i],C[i]);
 #endif
-
+    }
+    MPI_Finalize();
 	return 0;
 }
